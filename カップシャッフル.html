@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+    <meta charset="utf-8">
+    <title>カップシャッフルゲーム</title>
+    <style>
+        :root {
+            --table: #2e7d32;
+            --panel: #0b1220;
+            --accent: #60a5fa;
+        }
+
+        body {
+            margin: 0;
+            background: var(--panel);
+            color: #eef2ff;
+            font-family: 'Noto Sans JP', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .container {
+            width: 900px;
+            text-align: center;
+        }
+
+        h1 {
+            margin-bottom: 5px;
+        }
+
+        .hint {
+            font-size: 13px;
+            color: #bcd4c9;
+            margin-bottom: 10px;
+        }
+
+        .controls {
+            margin-bottom: 10px;
+        }
+
+        .difficulty-btn {
+            background: #fff;
+            border: none;
+            padding: 8px 14px;
+            margin: 3px;
+            border-radius: 8px;
+            color: #033;
+            cursor: pointer;
+            font-weight: 700;
+            transition: all 0.2s;
+        }
+
+        .difficulty-btn:hover {
+            filter: brightness(1.1);
+        }
+
+        .difficulty-btn.selected {
+            background: #60a5fa;
+            color: #06203a;
+            box-shadow: 0 0 10px rgba(96, 165, 250, 0.7);
+            transform: none;
+            /* ← 上ズレ防止 */
+        }
+
+        #startBtn {
+            background: var(--accent);
+            border: none;
+            padding: 8px 14px;
+            border-radius: 8px;
+            color: #06203a;
+            cursor: pointer;
+            font-weight: 800;
+        }
+
+        #startBtn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        canvas {
+            background: linear-gradient(180deg, var(--table), #1b5e20);
+            border-radius: 12px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6);
+        }
+
+        #result {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            padding: 14px 26px;
+            border-radius: 12px;
+            font-size: 34px;
+            font-weight: 800;
+            display: none;
+        }
+
+        .difficulty-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            filter: grayscale(0.6);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>カップシャッフルゲーム</h1>
+        <div class="hint">難易度を選んでスタート。最初に玉の位置が表示されます。</div>
+        <div class="controls">
+            <button class="difficulty-btn" data-diff="easy">簡単</button>
+            <button class="difficulty-btn" data-diff="normal">普通</button>
+            <button class="difficulty-btn" data-diff="hard">難しい</button>
+            <button class="difficulty-btn" data-diff="extreme">激ムズ</button>
+            <button id="startBtn" disabled>スタート</button>
+        </div>
+        <div style="position:relative">
+            <canvas id="gameCanvas" width="800" height="500"></canvas>
+            <div id="result"></div>
+        </div>
+    </div>
+
+    <script>
+        let bgm1 = new Audio('Almond_Nuts.mp3');
+        bgm1.loop = true;
+        bgm1.volume = 0.07;
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const diffBtns = document.querySelectorAll('.difficulty-btn');
+        const startBtn = document.getElementById('startBtn');
+        const resultDiv = document.getElementById('result');
+
+        let cups = [];
+        let isShuffling = false;
+        let selectedDiff = null;
+        let gameActive = false;
+        let showInitial = false;
+        let liftingCup = null;
+        let liftAmount = 0;
+
+        // 実際のカウンター（内部状態）
+        let streak = {
+            easy: 0,
+            normal: 0,
+            hard: 0,
+            extreme: 0
+        };
+
+        // 表示用カウンター（画面に描画する値）
+        // 不正解時は streak を 0 にしても displayedStreak はそのままにしておく
+        let displayedStreak = {
+            easy: 0,
+            normal: 0,
+            hard: 0,
+            extreme: 0
+        };
+
+        const cfgBase = {
+            tableY: 380,
+            lift: 46,
+            cupGap: 28
+        };
+        let cfg = {
+            ...cfgBase,
+            cupW: 140,
+            cupH: 160
+        };
+
+        const DIFF = {
+            easy: {
+                count: 3,
+                swaps: 6,
+                speed: 500
+            },
+            normal: {
+                count: 4,
+                swaps: 12,
+                speed: 380
+            },
+            hard: {
+                count: 5,
+                swaps: 24,
+                speed: 290
+            },
+            extreme: {
+                count: 5,
+                swaps: 28,
+                speed: 200
+            }
+        };
+
+        const audioCtx = new(window.AudioContext || window.webkitAudioContext)();
+
+        function playTone(f, d = 0.12, t = 'sine', v = 0.08) {
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            o.type = t;
+            o.frequency.value = f;
+            g.gain.value = v;
+            o.connect(g);
+            g.connect(audioCtx.destination);
+            o.start();
+            g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + d);
+            setTimeout(() => o.stop(), d * 1000);
+        }
+
+        function playShuffleTick() {
+            playTone(900, 0.2, 'triangle', 0.03);
+        }
+
+        function playCorrect() {
+            playTone(880, 0.2);
+            setTimeout(() => playTone(1320, 0.14), 120);
+        }
+
+        function playWrong() {
+            playTone(220, 0.2, 'sawtooth', 0.14);
+        }
+
+        function buildCups(count) {
+            cups = [];
+            const totalW = count * cfg.cupW + (count - 1) * cfg.cupGap;
+            const startX = (canvas.width - totalW) / 2;
+            for (let i = 0; i < count; i++) {
+                cups.push({
+                    x: startX + i * (cfg.cupW + cfg.cupGap),
+                    y: cfg.tableY - cfg.cupH,
+                    w: cfg.cupW,
+                    h: cfg.cupH,
+                    hasBall: false
+                });
+            }
+            cups[Math.floor(Math.random() * count)].hasBall = true;
+        }
+
+        function drawCup(c, lift = 0, reveal = false) {
+            const x = c.x,
+                y = c.y - lift,
+                w = c.w,
+                h = c.h;
+            ctx.beginPath();
+            ctx.ellipse(x + w / 2, cfg.tableY + 8, w / 2 + 12, 14, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0,0,0,0.45)';
+            ctx.fill();
+            ctx.beginPath();
+            const inset = w * 0.18;
+            ctx.moveTo(x, y + h);
+            ctx.lineTo(x + w, y + h);
+            ctx.lineTo(x + w - inset, y + 6);
+            ctx.lineTo(x + inset, y + 6);
+            ctx.closePath();
+            const grad = ctx.createLinearGradient(x, y, x, y + h);
+            grad.addColorStop(0, '#ddd');
+            grad.addColorStop(1, '#666');
+            ctx.fillStyle = grad;
+            ctx.fill();
+            if (reveal && c.hasBall) drawBall(x + w / 2, cfg.tableY - 22);
+        }
+
+        function drawBall(cx, cy) {
+            ctx.beginPath();
+            ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+            const g = ctx.createRadialGradient(cx - 6, cy - 6, 4, cx, cy, 18);
+
+            // 難易度で色を変える
+            const colors = {
+                easy: ['#b3fff0', '#00bfa5'],
+                normal: ['#b3e5ff', '#007bff'],
+                hard: ['#fff7b3', '#ffb400'],
+                extreme: ['#ffb3b3', '#d40000']
+            };
+            const [light, dark] = colors[selectedDiff] || ['#fff8b3', '#ffb400'];
+            g.addColorStop(0, light);
+            g.addColorStop(1, dark);
+
+            ctx.fillStyle = g;
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+            ctx.stroke();
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for (const c of cups) {
+                if (c !== liftingCup) drawCup(c);
+            }
+            if (showInitial) {
+                const b = cups.find(x => x.hasBall);
+                if (b) drawBall(b.x + b.w / 2, cfg.tableY - 22);
+            }
+            if (liftingCup) drawCup(liftingCup, liftAmount, true);
+
+            // 右上に連続正解数（表示用カウンターを使う）
+            ctx.font = '18px Noto Sans JP';
+            ctx.textAlign = 'right';
+            const padding = 20;
+            const colors = {
+                easy: '#6ee7b7',
+                normal: '#60a5fa',
+                hard: '#facc15',
+                extreme: '#f87171'
+            };
+            let line = 0;
+            for (const diff of ['easy', 'normal', 'hard', 'extreme']) {
+                ctx.fillStyle = colors[diff];
+                ctx.fillText(diff + ' 連続正解: ' + displayedStreak[diff], canvas.width - padding, 30 + line * 24);
+                line++;
+            }
+        }
+
+        function animateSwap(i, j, duration) {
+            return new Promise(res => {
+                const A = cups[i],
+                    B = cups[j];
+                const startAx = A.x,
+                    startBx = B.x,
+                    dx = startBx - startAx,
+                    t0 = performance.now();
+
+                function step(now) {
+                    const p = Math.min(1, (now - t0) / duration);
+                    const ease = p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
+                    A.x = startAx + dx * ease;
+                    B.x = startBx - dx * ease;
+                    draw();
+                    if (p < 1) requestAnimationFrame(step);
+                    else {
+                        A.x = startBx;
+                        B.x = startAx;
+                        [cups[i], cups[j]] = [cups[j], cups[i]];
+                        res();
+                    }
+                }
+                requestAnimationFrame(step);
+            });
+        }
+
+        async function shuffleTimes(times, speed) {
+            isShuffling = true;
+            for (let t = 0; t < times; t++) {
+                let a = Math.floor(Math.random() * cups.length),
+                    b = Math.floor(Math.random() * cups.length);
+                if (a === b) b = (a + 1) % cups.length;
+                playShuffleTick();
+                await animateSwap(a, b, speed);
+            }
+            isShuffling = false;
+            gameActive = true;
+        }
+
+        async function revealCup(c) {
+            if (!gameActive) return;
+            isShuffling = true;
+            gameActive = false;
+            const dur = 320,
+                t0 = performance.now();
+            liftingCup = c;
+            liftAmount = 0;
+            await new Promise(r => {
+                function up(now) {
+                    const p = Math.min(1, (now - t0) / dur);
+                    liftAmount = cfg.lift * (1 - Math.pow(1 - p, 3));
+                    draw();
+                    if (p < 1) requestAnimationFrame(up);
+                    else r();
+                }
+                requestAnimationFrame(up);
+            });
+            const correct = c.hasBall;
+            resultDiv.style.display = 'block';
+            resultDiv.textContent = correct ? '🎯 正解！' : '❌ はずれ！';
+            resultDiv.style.background = correct ? '#d1fae5' : '#fee2e2';
+            resultDiv.style.color = correct ? '#065f46' : '#7f1d1d';
+            if (correct) {
+                // 正解：内部・表示ともに増やす（即時反映）
+                streak[selectedDiff]++;
+                displayedStreak[selectedDiff]++;
+                playCorrect();
+                draw(); // 即時反映
+                setTimeout(() => {
+                    startBtn.disabled = false;
+                    diffBtns.forEach(b => b.disabled = false);
+                }, 1700);
+            } else {
+                // 不正解：内部の streak はリセットするが、表示用は変更しない（次のスタートで反映）
+                streak[selectedDiff] = 0;
+                playWrong();
+                const win = cups.find(x => x.hasBall);
+                await new Promise(r => setTimeout(r, 800));
+                liftingCup = win;
+                liftAmount = cfg.lift;
+                draw(); // 表示は displayedStreak を使うので変わらない
+                setTimeout(() => {
+                    startBtn.disabled = false;
+                    diffBtns.forEach(b => b.disabled = false);
+                }, 1700);
+            }
+            await new Promise(r => setTimeout(r, 1500));
+            resultDiv.style.display = 'none';
+            liftingCup = null;
+            liftAmount = 0;
+            isShuffling = false;
+        }
+
+        canvas.addEventListener('click', e => {
+            if (isShuffling || !gameActive) return;
+            const r = canvas.getBoundingClientRect();
+            const x = e.clientX - r.left,
+                y = e.clientY - r.top;
+            for (const c of cups) {
+                if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) {
+                    revealCup(c);
+                    break;
+                }
+            }
+        });
+
+        diffBtns.forEach(btn => {
+            btn.onclick = () => {
+                diffBtns.forEach(b => b.classList.remove('selected'));
+                btn.classList.add('selected');
+                selectedDiff = btn.dataset.diff;
+                startBtn.disabled = false;
+                bgm1.play();
+            };
+        });
+
+        startBtn.onclick = async () => {
+            if (!selectedDiff) return;
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
+            // ── ここで「不正解で内部的にリセットされた streak」を表示に反映する ──
+            // （不正解の場合はここで displayedStreak が streak と一致して 0 になる）
+            displayedStreak[selectedDiff] = streak[selectedDiff];
+            draw();
+
+            const s = DIFF[selectedDiff];
+            buildCups(s.count);
+            showInitial = true;
+            draw();
+            diffBtns.forEach(b => b.disabled = true);
+            startBtn.disabled = true;
+
+            // カウントダウン演出
+            resultDiv.style.display = 'block';
+            resultDiv.style.background = 'transparent';
+            resultDiv.style.color = '#fff';
+            resultDiv.style.fontSize = '60px';
+            resultDiv.style.textShadow = '0 0 15px rgba(0,0,0,0.6)';
+
+            const countdown = ['3', '2', '1', 'スタート！'];
+            const playJazzHit = (type) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                gain.connect(audioCtx.destination);
+                if (type === "kick") {
+                    osc.type = "sine";
+                    osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.2);
+                    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
+                } else if (type === "ride") {
+                    osc.type = "square";
+                    osc.frequency.setValueAtTime(1000, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(0.035, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+                }
+                osc.connect(gain);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.5);
+            };
+
+            for (let i = 0; i < countdown.length; i++) {
+                resultDiv.textContent = countdown[i];
+                playJazzHit(i < 3 ? "kick" : "ride");
+                await new Promise(r => setTimeout(r, 800));
+            }
+
+            resultDiv.style.display = 'none';
+            showInitial = false;
+            draw();
+            setTimeout(() => shuffleTimes(s.swaps, s.speed), 400);
+        };
+
+        draw();
+    </script>
+</body>
+
+</html>
